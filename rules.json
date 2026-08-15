@@ -1,0 +1,33 @@
+{
+  "common_base": "{BASE_FOLDER}",
+  "unknown_folder": "_unknown",
+  "log_folder": "_log",
+  "use_month_folder": true,
+  "month_folder_format": "YYYY-MM",
+  "month_source": "filename",
+  "month_fallback": "unknown_month",
+  "duplicate_mode": "evacuate",
+  "evacuation_folder_prefix": "避難用",
+  "forbid_overwrite": true,
+  "move_strategy": "copy_verify_delete",
+  "verify_after_move": true,
+  "check_file_stable": true,
+  "min_file_age_seconds": 10,
+  "backup_rules_on_save": true,
+  "max_path_length": 240,
+  "rules": [
+    {
+      "enabled": true,
+      "priority": 1,
+      "name": "Equipment A Calibration Record",
+      "extension": ".pdf",
+      "contains_all": [
+        "EquipmentA",
+        "CalibrationRecord"
+      ],
+      "contains_any": [],
+      "not_contains": [],
+      "destination_subfolder": "EquipmentA"
+    }
+  ]
+}

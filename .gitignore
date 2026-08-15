@@ -1,0 +1,13 @@
+# ツールの実行時に作られるもの
+_log/
+_unknown/
+_rules_backup/
+.sorter.lock
+rules.json.tmp
+
+# 仕分け対象のPDF
+*.pdf
+
+# Python
+__pycache__/
+*.pyc
