@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""PDFファイル名ルール管理および自動仕分けツール.
+"""ファイル名ルール管理および自動仕分けツール（PDF・Excel・Word など）.
 
 仕様書: ファイル移動仕様書.md
 設計原則: 基本設計.md
@@ -8,7 +8,7 @@
 Python標準ライブラリのみで動作する。外部ネットワークへは一切送信しない。
 
   py pdf_sorter_app.py server    ルール編集画面を起動
-  py pdf_sorter_app.py sort      rules.json に従いPDF移動を実行
+  py pdf_sorter_app.py sort      rules.json に従いファイル移動を実行
   py pdf_sorter_app.py preview   rules.json に従い移動予定先をコンソール表示
 """
 
@@ -27,8 +27,9 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP_NAME = "PDF自動仕分けツール"
-APP_VERSION = "1.0.0"
+APP_NAME = "ファイル自動仕分けツール"
+APP_VERSION = "1.1.0"
+BAT_FILE_NAME = "ファイル仕分けツール.bat"
 
 HOST = "127.0.0.1"
 PORT = 8765
@@ -44,9 +45,13 @@ RULES_BACKUP_KEEP = 20
 MONTH_UNKNOWN_FOLDER = "_年月不明"
 MONTH_AMBIGUOUS_FOLDER = "_年月確認要"
 
-TARGET_EXTENSION = ".pdf"
+DEFAULT_EXTENSION = ".pdf"
+DEFAULT_TARGET_EXTENSIONS = [DEFAULT_EXTENSION]
 EXCLUDE_PREFIXES = ("~$", ".")
 EXCLUDE_SUFFIXES = (".tmp", ".part", ".partial", ".crdownload", ".filepart")
+# 移動元がツールと同じフォルダのとき、ツール自身のファイルは対象にしない
+TOOL_FILE_NAMES = {"rules.json", "rules.json.tmp", ".sorter.lock"}
+TOOL_FILE_SUFFIXES = (".bat", ".py")
 
 WINDOWS_FORBIDDEN_CHARS = '<>:"|?*'
 WINDOWS_RESERVED_NAMES = {
@@ -86,6 +91,8 @@ E_FORBIDDEN_PATH = "ERROR_FORBIDDEN_PATH"
 E_UNDO_FAILED = "ERROR_UNDO_FAILED"
 
 DEFAULT_SETTINGS = {
+    "source_folder": "",
+    "target_extensions": list(DEFAULT_TARGET_EXTENSIONS),
     "common_base": UNSET_BASE_PLACEHOLDER,
     "unknown_folder": "_unknown",
     "log_folder": "_log",
@@ -109,7 +116,7 @@ DEFAULT_RULE = {
     "enabled": True,
     "priority": 1,
     "name": "",
-    "extension": TARGET_EXTENSION,
+    "extension": "",
     "contains_all": [],
     "contains_any": [],
     "not_contains": [],
@@ -141,6 +148,12 @@ def rules_path() -> Path:
 
 def lock_path() -> Path:
     return app_dir() / LOCK_FILE_NAME
+
+
+def source_dir(settings: dict) -> Path:
+    """移動元フォルダ。未設定ならツールと同じフォルダ。"""
+    folder = (settings.get("source_folder") or "").strip()
+    return Path(folder) if folder else app_dir()
 
 
 def log_dir(settings: dict) -> Path:
@@ -218,6 +231,39 @@ def _as_str_list(value, field: str, errors: list) -> list:
     return items
 
 
+def normalize_extension(text: str, label: str, errors: list) -> str:
+    """拡張子を .xxx の形に整える。使えない場合はエラーを積んで空文字を返す。"""
+    value = (text or "").strip().lower()
+    if not value:
+        return ""
+    if not value.startswith("."):
+        value = "." + value
+    if len(value) < 2 or re.search(r'[\\/:*?"<>|\s]', value[1:]):
+        errors.append(f"{label} に {text} は使用できません（例: .pdf）")
+        return ""
+    return value
+
+
+def normalize_extension_list(value, label: str, errors: list) -> list:
+    """対象拡張子の一覧を整える。空の一覧は「すべてのファイル」を意味する。"""
+    if value is None:
+        return list(DEFAULT_TARGET_EXTENSIONS)
+    if isinstance(value, str):
+        value = re.split(r"[,\u3001\s]+", value)
+    if not isinstance(value, list):
+        errors.append(f"{label} は文字列の配列で指定してください")
+        return list(DEFAULT_TARGET_EXTENSIONS)
+    extensions = []
+    for entry in value:
+        if not isinstance(entry, str):
+            errors.append(f"{label} には文字列のみ指定できます")
+            continue
+        normalized = normalize_extension(entry, label, errors)
+        if normalized and normalized not in extensions:
+            extensions.append(normalized)
+    return extensions
+
+
 def folder_name_error(name: str, label: str) -> str:
     """単一フォルダ名として使えるかを判定する（仕様書 14.2）。"""
     if not name:
@@ -257,7 +303,7 @@ def subfolder_error(value: str, label: str = "保存先サブフォルダ") -> s
     return ""
 
 
-def normalize_rule(raw, index: int, errors: list) -> dict:
+def normalize_rule(raw, index: int, errors: list, target_extensions: list) -> dict:
     """1件のルールを検証して正規化する。"""
     label = f"ルール{index + 1}"
     if not isinstance(raw, dict):
@@ -273,16 +319,13 @@ def normalize_rule(raw, index: int, errors: list) -> dict:
         errors.append(f"{label}: ルール名を入力してください")
     rule["name"] = name
 
-    extension = _as_str(raw.get("extension", TARGET_EXTENSION), f"{label} の 拡張子", errors)
-    if extension:
-        if not extension.startswith("."):
-            extension = "." + extension
-        extension = extension.lower()
-        if extension != TARGET_EXTENSION:
-            errors.append(
-                f"{label}: 初期仕様の対象は {TARGET_EXTENSION} のみです"
-                f"（{extension} を指定したルールは一致しません）"
-            )
+    extension = normalize_extension(_as_str(raw.get("extension", ""), f"{label} の 拡張子", errors),
+                                    f"{label} の 拡張子", errors)
+    if extension and target_extensions and extension not in target_extensions:
+        errors.append(
+            f"{label}: 拡張子 {extension} は対象の拡張子に含まれていないため、このルールは一致しません"
+            f"（共通設定の「対象の拡張子」に {extension} を追加してください）"
+        )
     rule["extension"] = extension
 
     rule["contains_all"] = _as_str_list(raw.get("contains_all"), f"{label} の すべて含むキーワード", errors)
@@ -313,6 +356,15 @@ def normalize_settings(raw) -> tuple:
 
     settings = dict(DEFAULT_SETTINGS)
     settings["common_base"] = _as_str(raw.get("common_base", DEFAULT_SETTINGS["common_base"]), "共通保存先フォルダ", errors)
+
+    source = _as_str(raw.get("source_folder", ""), "移動元フォルダ", errors)
+    error = base_format_error(source, "移動元フォルダ")
+    if error:
+        errors.append(error)
+    settings["source_folder"] = source
+
+    settings["target_extensions"] = normalize_extension_list(
+        raw.get("target_extensions", DEFAULT_TARGET_EXTENSIONS), "対象の拡張子", errors)
 
     for field, label in (("unknown_folder", "判定不能フォルダ名"), ("log_folder", "ログフォルダ名")):
         value = _as_str(raw.get(field, DEFAULT_SETTINGS[field]), label, errors)
@@ -349,7 +401,8 @@ def normalize_settings(raw) -> tuple:
     if not isinstance(raw_rules, list):
         errors.append("rules は配列で指定してください")
         raw_rules = []
-    settings["rules"] = [normalize_rule(entry, index, errors) for index, entry in enumerate(raw_rules)]
+    settings["rules"] = [normalize_rule(entry, index, errors, settings["target_extensions"])
+                         for index, entry in enumerate(raw_rules)]
     return settings, errors
 
 
@@ -394,6 +447,27 @@ def resolve_rule_base(rule: dict, settings: dict) -> tuple:
     if own:
         return own, True
     return (settings.get("common_base", "") or "").strip(), False
+
+
+def source_folder_error(settings: dict) -> str:
+    """移動元フォルダが使えるかを判定する（未設定＝ツールと同じフォルダ）。"""
+    folder = (settings.get("source_folder") or "").strip()
+    if not folder:
+        return ""
+    return folder_path_error(folder, "移動元フォルダ")
+
+
+def run_blockers(settings: dict) -> list:
+    """実行できない理由を集める。空なら実行できる。"""
+    problems = []
+    error = source_folder_error(settings)
+    if error:
+        problems.append(error)
+    if common_base_required(settings):
+        error = base_folder_error(settings)
+        if error:
+            problems.append(error)
+    return problems
 
 
 def common_base_required(settings: dict) -> bool:
@@ -564,21 +638,46 @@ def match_rule(file_name: str, rules: list) -> tuple:
 # 対象ファイルの収集（仕様書 7.1 / 7.2）
 # =========================================================================
 
-def collect_target_files() -> list:
-    """スクリプトと同じフォルダ内のPDFを、処理開始時点で固定して返す。"""
+def is_same_folder(a: Path, b: Path) -> bool:
+    try:
+        return os.path.normcase(str(a.resolve())) == os.path.normcase(str(b.resolve()))
+    except OSError:
+        return False
+
+
+def collect_target_files(settings: dict) -> list:
+    """移動元フォルダ直下の対象ファイルを、処理開始時点で固定して返す。"""
+    folder = source_dir(settings)
+    extensions = settings.get("target_extensions") or []
+    own_folder = is_same_folder(folder, app_dir())
+
     files = []
-    for path in sorted(app_dir().iterdir(), key=lambda item: item.name.lower()):
+    try:
+        entries = sorted(folder.iterdir(), key=lambda item: item.name.lower())
+    except OSError:
+        return files
+
+    for path in entries:
         if not path.is_file():
             continue
         name = path.name
-        if name.lower().endswith(EXCLUDE_SUFFIXES):
+        lowered = name.lower()
+        if lowered.endswith(EXCLUDE_SUFFIXES) or name.startswith(EXCLUDE_PREFIXES):
             continue
-        if name.startswith(EXCLUDE_PREFIXES):
+        if lowered in TOOL_FILE_NAMES or name == Path(__file__).name:
             continue
-        if path.suffix.lower() != TARGET_EXTENSION:
+        if own_folder and lowered.endswith(TOOL_FILE_SUFFIXES):
+            continue
+        if extensions and path.suffix.lower() not in extensions:
             continue
         files.append(path)
     return files
+
+
+def extensions_text(settings: dict) -> str:
+    """画面やコンソールに出す対象拡張子の文言。"""
+    extensions = settings.get("target_extensions") or []
+    return " / ".join(extensions) if extensions else "すべてのファイル"
 
 
 def stability_error(path: Path, settings: dict) -> str:
@@ -654,7 +753,7 @@ def build_plan(path: Path, settings: dict, rules: list, today: datetime) -> dict
 
     if rule is None:
         # ルール未一致（仕様書 15.1）
-        destination = app_dir() / settings.get("unknown_folder", "_unknown") / path.name
+        destination = source_dir(settings) / settings.get("unknown_folder", "_unknown") / path.name
         plan.update(rule_name="", planned_destination=str(destination), destination=str(destination),
                     result=R_UNKNOWN, message="ルールに一致しないため判定不能フォルダへ移動します", movable=True)
         return plan
@@ -951,8 +1050,8 @@ class SortLock:
 # =========================================================================
 
 def run_sort(settings: dict) -> dict:
-    """PDF移動を実行する。戻り値は {"ok", "items", "summary", "message", ...}。"""
-    files = collect_target_files()
+    """ファイル移動を実行する。戻り値は {"ok", "items", "summary", "message", ...}。"""
+    files = collect_target_files(settings)
     plans = build_plans(settings, files)
     logger = MoveLogger(settings)
     today = datetime.now()
@@ -1112,7 +1211,7 @@ MONTH_PATTERN_EXAMPLES = ["2026.6", "2026.06", "2026-6", "2026-06", "2026_6", "2
 def build_meta(settings: dict, errors: list) -> dict:
     """画面表示用の付帯情報（出どころ・件数・実行可否の根拠）をまとめる。"""
     files = []
-    for path in collect_target_files():
+    for path in collect_target_files(settings):
         try:
             stat = path.stat()
             size, modified = stat.st_size, datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
@@ -1141,9 +1240,14 @@ def build_meta(settings: dict, errors: list) -> dict:
         "script_folder": str(app_dir()),
         "rules_path": str(rules_path()),
         "log_path": str(log_path(settings)),
-        "unknown_path": str(app_dir() / settings.get("unknown_folder", "_unknown")),
+        "source_folder": str(source_dir(settings)),
+        "source_is_tool_folder": is_same_folder(source_dir(settings), app_dir()),
+        "source_folder_error": source_folder_error(settings),
+        "target_extensions": settings.get("target_extensions") or [],
+        "extensions_text": extensions_text(settings),
+        "unknown_path": str(source_dir(settings) / settings.get("unknown_folder", "_unknown")),
         "backup_folder": str(app_dir() / RULES_BACKUP_FOLDER),
-        "target_extension": TARGET_EXTENSION,
+
         "files": files,
         "file_count": len(files),
         "base_folder_error": base_folder_error(settings),
@@ -1189,7 +1293,7 @@ def console_label(result: str) -> str:
 
 def print_items(items: list) -> None:
     if not items:
-        echo("  対象のPDFはありません。")
+        echo("  対象のファイルはありません。")
         return
     for item in items:
         destination = item.get("actual_destination") or item.get("destination") or "（移動しません）"
@@ -1229,7 +1333,7 @@ def load_for_cli() -> tuple:
     if errors:
         print_settings_errors(errors)
         echo()
-        echo("      ルール編集画面（edit_rules.bat）で修正してください。処理は中断します。")
+        echo(f"      {BAT_FILE_NAME} を実行して画面から修正してください。処理は中断します。")
         return None, errors
     return settings, []
 
@@ -1244,19 +1348,17 @@ def cli_preview() -> int:
     if settings is None:
         return 1
 
-    if common_base_required(settings):
-        base_error = base_folder_error(settings)
-        if base_error:
-            echo(f"[ NG ] {base_error}")
-            echo(f"      共通保存先フォルダ: {settings.get('common_base')}")
-            echo("      PDF仕分けツール.bat を実行して共通設定を修正してください。")
-            echo("      （ルールごとに保存先フォルダを指定している場合、共通保存先は使われません）")
-            return 1
+    problems = run_blockers(settings)
+    if problems:
+        for problem in problems:
+            echo(f"[ NG ] {problem}")
+        echo(f"      {BAT_FILE_NAME} を実行して共通設定を修正してください。")
+        return 1
 
-    files = collect_target_files()
-    echo(f"対象フォルダ : {app_dir()}")
-    echo(f"対象PDF      : {len(files)} 件（サブフォルダ内は対象外）")
-    echo(f"共通保存先   : {settings['common_base']}")
+    files = collect_target_files(settings)
+    echo(f"移動元フォルダ : {source_dir(settings)}")
+    echo(f"対象の拡張子   : {extensions_text(settings)}")
+    echo(f"対象ファイル   : {len(files)} 件（サブフォルダ内は対象外）")
     echo()
     items = build_plans(settings, files)
     print_items(items)
@@ -1266,19 +1368,17 @@ def cli_preview() -> int:
 
 
 def cli_sort() -> int:
-    print_header(f"{APP_NAME} - PDF移動（画面を使わない実行）")
+    print_header(f"{APP_NAME} - ファイル移動（画面を使わない実行）")
     settings, _ = load_for_cli()
     if settings is None:
         return 1
 
-    if common_base_required(settings):
-        base_error = base_folder_error(settings)
-        if base_error:
-            echo(f"[ NG ] {base_error}")
-            echo(f"      共通保存先フォルダ: {settings.get('common_base')}")
-            echo("      PDF仕分けツール.bat を実行して共通設定を修正してください。")
-            echo("      （ルールごとに保存先フォルダを指定している場合、共通保存先は使われません）")
-            return 1
+    problems = run_blockers(settings)
+    if problems:
+        for problem in problems:
+            echo(f"[ NG ] {problem}")
+        echo(f"      {BAT_FILE_NAME} を実行して共通設定を修正してください。")
+        return 1
 
     with SortLock() as lock:
         if not lock.acquire():
@@ -1289,8 +1389,8 @@ def cli_sort() -> int:
             echo("      実行中のウィンドウが無い場合は、上記ファイルを削除してから再実行してください。")
             return 1
 
-        echo(f"対象フォルダ : {app_dir()}")
-        echo(f"共通保存先   : {settings['common_base']}")
+        echo(f"移動元フォルダ : {source_dir(settings)}")
+        echo(f"対象の拡張子   : {extensions_text(settings)}")
         echo()
         result = run_sort(settings)
 
@@ -1301,7 +1401,7 @@ def cli_sort() -> int:
     if result.get("log_error"):
         echo(f"[ NG ] {result['log_error']}")
     if result["summary"]["total"] == 0:
-        echo("対象のPDFがありません。仕分けしたいPDFをこのフォルダへ置いてから実行してください。")
+        echo(f"対象のファイルがありません。仕分けしたいファイルを {source_dir(settings)} へ置いてから実行してください。")
     return 0
 
 
@@ -1458,15 +1558,15 @@ class SorterHandler(BaseHTTPRequestHandler):
         if error:
             self._send_json(error, 400)
             return
-        base_error = base_folder_error(settings) if common_base_required(settings) else ""
-        files = collect_target_files()
+        problems = run_blockers(settings)
+        files = collect_target_files(settings)
         items = build_plans(settings, files)
         self._send_json({
-            "ok": not base_error,
+            "ok": not problems,
             "items": items,
             "summary": summarize(items),
-            "message": base_error or f"{len(items)} 件のPDFを判定しました（ファイルは移動していません）",
-            "base_folder_error": base_error,
+            "message": problems[0] if problems else f"{len(items)} 件を判定しました（ファイルは移動していません）",
+            "errors": problems,
             "_meta": build_meta(settings, []),
         })
 
@@ -1475,12 +1575,11 @@ class SorterHandler(BaseHTTPRequestHandler):
         if error:
             self._send_json(error, 400)
             return
-        if common_base_required(settings):
-            base_error = base_folder_error(settings)
-            if base_error:
-                self._send_json({"ok": False, "result": E_FORBIDDEN_PATH, "message": base_error,
-                                 "errors": [base_error]}, 400)
-                return
+        problems = run_blockers(settings)
+        if problems:
+            self._send_json({"ok": False, "result": E_FORBIDDEN_PATH, "message": problems[0],
+                             "errors": problems}, 400)
+            return
         try:
             write_settings_atomically(settings, backup=settings.get("backup_rules_on_save", True))
         except OSError as exc:
@@ -1529,7 +1628,7 @@ class SorterHandler(BaseHTTPRequestHandler):
 
 def start_server() -> int:
     print_header(APP_NAME)
-    _, errors, fatal = load_settings()  # 起動時に rules.json を用意する
+    settings, errors, fatal = load_settings()  # 起動時に rules.json を用意する
     if errors:
         print_settings_errors(errors)
         echo()
@@ -1551,12 +1650,12 @@ def start_server() -> int:
         return 1
 
     url = f"http://{HOST}:{httpd.server_address[1]}/"
-    echo(f"対象フォルダ : {app_dir()}")
-    echo(f"設定ファイル : {rules_path()}")
-    echo(f"操作画面     : {url}")
+    echo(f"移動元フォルダ : {source_dir(settings)}")
+    echo(f"設定ファイル   : {rules_path()}")
+    echo(f"操作画面       : {url}")
     echo()
     echo("ブラウザで操作画面を開きます。")
-    echo("ルールの設定、移動プレビュー、PDF移動は、すべて画面から行えます。")
+    echo("ルールの設定、移動プレビュー、ファイル移動は、すべて画面から行えます。")
     echo("終了するときは、画面右上の「…」から「ツールを終了」を選んでください。")
     echo("（このサーバーは 127.0.0.1 のみで待ち受けます。外部へは公開されません）")
     echo()
@@ -1577,9 +1676,9 @@ def start_server() -> int:
 # =========================================================================
 
 USAGE = """使い方:
-  py pdf_sorter_app.py           操作画面を開く（PDF仕分けツール.bat と同じ。通常はこちら）
+  py pdf_sorter_app.py           操作画面を開く（ファイル仕分けツール.bat と同じ。通常はこちら）
   py pdf_sorter_app.py server    操作画面を開く
-  py pdf_sorter_app.py sort      画面を使わずPDFを移動する（タスクスケジューラ等での自動実行用）
+  py pdf_sorter_app.py sort      画面を使わずファイルを移動する（タスクスケジューラ等での自動実行用）
   py pdf_sorter_app.py preview   画面を使わず移動予定先をコンソールに表示する（移動しません）
 """
 
@@ -1613,7 +1712,7 @@ UI_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PDF自動仕分けツール</title>
+<title>ファイル自動仕分けツール</title>
 <link rel="stylesheet" href="/app.css">
 </head>
 <body>
@@ -1621,9 +1720,9 @@ UI_HTML = r"""<!DOCTYPE html>
 
   <header class="topbar">
     <div class="topbar__identity">
-      <span class="topbar__mark" aria-hidden="true">PDF</span>
+      <span class="topbar__mark" aria-hidden="true">仕分</span>
       <div class="topbar__names">
-        <h1 class="topbar__title">PDF自動仕分けツール</h1>
+        <h1 class="topbar__title">ファイル自動仕分けツール</h1>
         <p class="topbar__sub" id="topbar-sub">読み込み中です</p>
       </div>
     </div>
@@ -1670,7 +1769,7 @@ UI_HTML = r"""<!DOCTYPE html>
       <div class="summary" id="summary" hidden></div>
       <div class="undo-bar" id="undo-bar" hidden></div>
       <div class="panel__body scroll" id="result-area"></div>
-      <p class="panel__foot" id="result-foot">対象はこのフォルダ直下の .pdf のみです。サブフォルダ内と一時ファイルは対象外です。</p>
+      <p class="panel__foot" id="result-foot">対象は移動元フォルダ直下のファイルです。サブフォルダ内と一時ファイルは対象外です。</p>
     </section>
 
   </main>
@@ -1696,7 +1795,7 @@ UI_HTML = r"""<!DOCTYPE html>
   <div class="farewell__box">
     <p class="farewell__title">ツールを終了しました</p>
     <p class="farewell__text">この画面（ブラウザのタブ）は閉じて構いません。<br>
-      もう一度使うときは <b>PDF仕分けツール.bat</b> を実行してください。</p>
+      もう一度使うときは <b>ファイル仕分けツール.bat</b> を実行してください。</p>
   </div>
 </div>
 
@@ -1705,10 +1804,24 @@ UI_HTML = r"""<!DOCTYPE html>
     <header class="dialog__head">
       <h2 id="settings-title">共通設定</h2>
       <p>すべてのルールに共通する設定です。変更は画面上の内容として保持され、保存または実行のときに rules.json へ書き込まれます。</p>
-      <p class="dialog__lead" id="settings-lead" hidden>まず、仕分けしたPDFの保存先（共通保存先フォルダ）を指定してください。ここが決まると実行できるようになります。</p>
+      <p class="dialog__lead" id="settings-lead" hidden>まず、仕分けしたファイルの保存先（共通保存先フォルダ）を指定してください。ここが決まると実行できるようになります。</p>
     </header>
 
     <div class="dialog__body scroll">
+      <div class="field field--wide">
+        <label for="set-source-folder">移動元フォルダ</label>
+        <input type="text" id="set-source-folder" data-setting="source_folder" spellcheck="false"
+               placeholder="空欄ならツールと同じフォルダ">
+        <p class="field__hint" id="hint-source-folder">仕分けの対象を探すフォルダです。ここに設定すると次回以降も記憶します。</p>
+      </div>
+
+      <div class="field field--wide">
+        <label for="set-extensions">対象の拡張子</label>
+        <input type="text" id="set-extensions" data-setting="target_extensions" spellcheck="false"
+               placeholder="例: .pdf, .xlsx, .docx">
+        <p class="field__hint" id="hint-extensions">カンマ区切り。空欄にするとすべてのファイルが対象になります。</p>
+      </div>
+
       <div class="field field--wide">
         <label for="set-common-base">共通保存先フォルダ</label>
         <input type="text" id="set-common-base" data-setting="common_base" spellcheck="false"
@@ -1719,7 +1832,7 @@ UI_HTML = r"""<!DOCTYPE html>
       <div class="field">
         <label for="set-unknown-folder">判定不能フォルダ名</label>
         <input type="text" id="set-unknown-folder" data-setting="unknown_folder" spellcheck="false">
-        <p class="field__hint" id="hint-unknown-folder">ルールに一致しないPDFの退避先です。</p>
+        <p class="field__hint" id="hint-unknown-folder">ルールに一致しないファイルの退避先です。</p>
       </div>
 
       <div class="field">
@@ -2608,7 +2721,7 @@ UI_JS = r"""'use strict';
    ===================================================================== */
 
 const SETTING_KEYS = [
-  'common_base', 'unknown_folder', 'log_folder', 'use_month_folder', 'month_folder_format',
+  'source_folder', 'target_extensions', 'common_base', 'unknown_folder', 'log_folder', 'use_month_folder', 'month_folder_format',
   'month_source', 'month_fallback', 'duplicate_mode', 'evacuation_folder_prefix', 'forbid_overwrite',
   'move_strategy', 'verify_after_move', 'check_file_stable', 'min_file_age_seconds',
   'backup_rules_on_save', 'max_path_length',
@@ -2674,6 +2787,34 @@ function esc(value) {
   return String(value === null || value === undefined ? '' : value)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+/* 「.pdf, xlsx」→ ['.pdf', '.xlsx'] */
+function splitExtensions(text) {
+  return String(text || '').split(/[,、\s]+/).map((item) => item.trim().toLowerCase())
+    .filter(Boolean).map((item) => (item.startsWith('.') ? item : '.' + item))
+    .filter((item, index, list) => list.indexOf(item) === index);
+}
+
+/* 画面に出す移動元フォルダ（未設定ならツールと同じフォルダ） */
+function sourceFolderText() {
+  const own = String(state.settings.source_folder || '').trim();
+  if (own) return own;
+  return state.meta ? state.meta.script_folder : 'ツールと同じフォルダ';
+}
+
+function extensionsText() {
+  const list = state.settings.target_extensions || [];
+  return list.length ? list.join(' / ') : 'すべてのファイル';
+}
+
+function extensionListError(list) {
+  for (const item of list) {
+    if (item.length < 2 || /[\\/:*?"<>|\s]/.test(item.slice(1))) {
+      return `対象の拡張子に ${item} は使用できません（例: .pdf）`;
+    }
+  }
+  return '';
 }
 
 function splitKeywords(text) {
@@ -2784,7 +2925,7 @@ function currentPayload() {
     enabled: !!rule.enabled,
     priority: Number(rule.priority) || 0,
     name: rule.name || '',
-    extension: rule.extension || '.pdf',
+    extension: rule.extension || '',
     contains_all: splitKeywords(rule.contains_all_text),
     contains_any: splitKeywords(rule.contains_any_text),
     not_contains: splitKeywords(rule.not_contains_text),
@@ -2802,7 +2943,7 @@ function adoptSettings(payload) {
     enabled: !!rule.enabled,
     priority: rule.priority,
     name: rule.name || '',
-    extension: rule.extension || '.pdf',
+    extension: rule.extension || '',
     contains_all_text: joinKeywords(rule.contains_all),
     contains_any_text: joinKeywords(rule.contains_any),
     not_contains_text: joinKeywords(rule.not_contains),
@@ -2916,7 +3057,12 @@ function validate() {
     const label = `ルール${index + 1}`;
     if (!String(rule.name || '').trim()) errors.name = 'ルール名を入力してください';
     const extension = String(rule.extension || '').trim().toLowerCase();
-    if (extension && extension !== '.pdf') errors.extension = '初期仕様の対象は .pdf のみです';
+    const targets = state.settings.target_extensions || [];
+    if (extension && (extension.length < 2 || /[\\/:*?"<>|\s]/.test(extension.slice(1)))) {
+      errors.extension = 'この拡張子は使用できません（例: .pdf）';
+    } else if (extension && targets.length && !targets.includes(extension)) {
+      errors.extension = `対象の拡張子に含まれていません（共通設定に ${extension} を追加してください）`;
+    }
     if (!splitKeywords(rule.contains_all_text).length && !splitKeywords(rule.contains_any_text).length) {
       errors.contains_all_text = 'すべて含む／いずれか含む のどちらかにキーワードが必要です';
     }
@@ -2931,6 +3077,11 @@ function validate() {
     }
   });
 
+  const sourceError = baseFormatError(String(state.settings.source_folder || '').trim(), '移動元フォルダ');
+  if (sourceError) messages.push(sourceError);
+  const extensionError = extensionListError(state.settings.target_extensions || []);
+  if (extensionError) messages.push(extensionError);
+
   const unknownError = folderNameError(String(state.settings.unknown_folder || '').trim(), '判定不能フォルダ名');
   if (unknownError) messages.push(unknownError);
   const logError = folderNameError(String(state.settings.log_folder || '').trim(), 'ログフォルダ名');
@@ -2942,6 +3093,17 @@ function validate() {
   if (!Number.isFinite(pathLimit) || pathLimit < 60 || pathLimit > 32767) messages.push('最大パス長は 60〜32767 文字で指定してください');
 
   return { ruleErrors, messages };
+}
+
+function sourceError() {
+  const own = String(state.settings.source_folder || '').trim();
+  if (!own) return '';
+  const format = baseFormatError(own, '移動元フォルダ');
+  if (format) return format;
+  if (state.meta && state.baseCheckedFor === state.settings.common_base && state.meta.source_folder_error) {
+    return state.meta.source_folder_error;
+  }
+  return '';
 }
 
 function baseError() {
@@ -2981,14 +3143,16 @@ function renderFacts() {
   const baseProblem = baseError();
   const hasBase = base && base !== '{BASE_FOLDER}';
   const parts = [];
-  parts.push(fact('作業フォルダ', meta.script_folder, false));
+  const sourceProblem = baseFormatError(String(state.settings.source_folder || '').trim(), '移動元フォルダ')
+    || (state.baseCheckedFor === state.settings.common_base ? meta.source_folder_error : '');
+  parts.push(fact('移動元', sourceProblem || sourceFolderText(), !!sourceProblem));
   parts.push(fact('共通保存先',
     baseProblem ? baseProblem : (hasBase ? base : 'ルールごとに指定'), !!baseProblem));
   parts.push(fact('ログ', meta.log_path, false));
   facts.innerHTML = parts.join('');
 
   $('#topbar-sub').textContent =
-    `このフォルダ直下の ${meta.target_extension} ${meta.file_count} 件が対象です（${meta.generated_at} 時点）`;
+    `移動元フォルダ直下の ${extensionsText()} ${meta.file_count} 件が対象です（${meta.generated_at} 時点）`;
 }
 
 function fact(term, description, alert) {
@@ -3014,8 +3178,8 @@ function renderRules() {
   if (!state.rules.length) {
     list.innerHTML = `<div class="empty">
       <p class="empty__title">ルールがまだありません</p>
-      <p class="empty__text">ルールを追加すると、ファイル名のキーワードでPDFの保存先を決められます。
-      ルールが 0 件のときは、すべてのPDFが判定不能フォルダへ移動します。</p>
+      <p class="empty__text">ルールを追加すると、ファイル名のキーワードで保存先を決められます。
+      ルールが 0 件のときは、すべてのファイルが判定不能フォルダへ移動します。</p>
     </div>`;
     return;
   }
@@ -3062,7 +3226,7 @@ function ruleCard(rule, index, errors) {
     '空欄なら共通保存先を使います（例: D:\\共有\\設備A）', true)}
       ${field('保存先サブフォルダ', 'destination_subfolder', rule.destination_subfolder, errors.destination_subfolder,
     '保存先フォルダの下に作るフォルダ名', false)}
-      ${field('拡張子', 'extension', rule.extension, errors.extension, '初期仕様では .pdf のみ', false)}
+      ${field('拡張子', 'extension', rule.extension, errors.extension, `空欄なら対象すべて（${extensionsText()}）`, false)}
     </div>
 
     <footer class="rule__foot">
@@ -3144,13 +3308,13 @@ function renderResults() {
     headActions.innerHTML = '';
     const files = (state.meta && state.meta.files) || [];
     note.textContent = files.length
-      ? `このフォルダにある対象PDF ${files.length} 件（まだ判定していません）`
-      : '対象PDFがありません';
-    const folder = state.meta ? state.meta.script_folder : 'このツールと同じフォルダ';
+      ? `移動元フォルダにある対象ファイル ${files.length} 件（まだ判定していません）`
+      : '対象のファイルがありません';
+    const folder = sourceFolderText();
     area.innerHTML = files.length ? fileList(files) : `<div class="empty">
-        <p class="empty__title">対象のPDFがありません</p>
-        <p class="empty__text">仕分けしたいPDFを、このツールと同じフォルダに置いてから「再読み込み」を押してください。
-        サブフォルダ内のPDFと一時ファイルは対象外です。</p>
+        <p class="empty__title">対象のファイルがありません</p>
+        <p class="empty__text">仕分けしたいファイル（${esc(extensionsText())}）を移動元フォルダに置いてから
+        「再読み込み」を押してください。サブフォルダ内と一時ファイルは対象外です。</p>
         <p class="empty__path" title="${esc(folder)}">${esc(tailText(folder, 52))}</p>
       </div>`;
     return;
@@ -3159,7 +3323,7 @@ function renderResults() {
   const modeLabel = view.mode === 'preview' ? 'プレビュー結果（ファイルは移動していません）'
     : view.mode === 'undone' ? '取り消し結果' : '実行結果';
   note.textContent = `${view.at} 時点の${modeLabel}`;
-  headActions.innerHTML = `<button type="button" class="btn btn--ghost" data-action="back-to-files">対象PDF一覧へ戻る</button>`;
+  headActions.innerHTML = `<button type="button" class="btn btn--ghost" data-action="back-to-files">対象ファイル一覧へ戻る</button>`;
 
   const items = view.filter ? view.items.filter((item) => categorize(item.result) === view.filter) : view.items;
   if (!items.length) {
@@ -3243,7 +3407,7 @@ function renderActionBar() {
   $('#btn-preview').disabled = state.busy || validation.messages.length > 0;
   $('#btn-reload').disabled = state.busy;
 
-  let label = `${count} 件のPDFを移動する`;
+  let label = `${count} 件のファイルを移動する`;
   let disabled = false;
   let reasonHtml = '';
   let hintText = '';
@@ -3260,6 +3424,10 @@ function renderActionBar() {
     disabled = true;
     reasonHtml = `<span class="chip chip--danger"><span class="chip__icon" aria-hidden="true">✕</span>実行できません</span>設定に ${validation.messages.length} 件の問題があります`;
     hintText = validation.messages[0] + (validation.messages.length > 1 ? ` ほか ${validation.messages.length - 1} 件` : '');
+  } else if (sourceError()) {
+    disabled = true;
+    reasonHtml = `<span class="chip chip--danger"><span class="chip__icon" aria-hidden="true">✕</span>実行できません</span>${esc(sourceError())}`;
+    hintText = '「共通設定」で移動元フォルダを確認してください';
   } else if (base) {
     disabled = true;
     reasonHtml = `<span class="chip chip--danger"><span class="chip__icon" aria-hidden="true">✕</span>実行できません</span>${esc(base)}`;
@@ -3269,10 +3437,10 @@ function renderActionBar() {
     reasonHtml = `<span class="chip chip--warn"><span class="chip__icon" aria-hidden="true">▲</span>実行中</span>他の処理が実行中です`;
     hintText = `ロックファイル: ${meta.lock.path}（実行中のウィンドウが無い場合は削除してください）`;
   } else if (count === 0) {
-    label = '移動するPDFがありません';
+    label = '移動するファイルがありません';
     disabled = true;
-    reasonHtml = `<span class="chip chip--neutral"><span class="chip__icon" aria-hidden="true">—</span>対象なし</span>このフォルダに対象のPDFがありません`;
-    hintText = meta ? `${meta.script_folder} にPDFを置いてから「再読み込み」を押してください` : '';
+    reasonHtml = `<span class="chip chip--neutral"><span class="chip__icon" aria-hidden="true">—</span>対象なし</span>移動元フォルダに対象のファイルがありません（対象: ${esc(extensionsText())}）`;
+    hintText = `${sourceFolderText()} にファイルを置いてから「再読み込み」を押してください`;
   } else {
     const enabledRules = state.rules.filter((rule) => rule.enabled).length;
     const bases = new Set(state.rules.filter((rule) => rule.enabled).map((rule) => ruleBase(rule).path));
@@ -3300,14 +3468,14 @@ function renderActionBar() {
    ===================================================================== */
 
 const MONTH_FALLBACK_HINTS = {
-  unknown_month: '年月が取れないPDFは _年月不明 フォルダへ退避します（実行月へ誤って保存しないため推奨）',
-  current_month: '年月が取れないPDFは実行日の年月フォルダへ保存します',
-  error: '年月が取れないPDFは移動せず、エラーとして記録します',
+  unknown_month: '年月が取れないファイルは _年月不明 フォルダへ退避します（実行月へ誤って保存しないため推奨）',
+  current_month: '年月が取れないファイルは実行日の年月フォルダへ保存します',
+  error: '年月が取れないファイルは移動せず、エラーとして記録します',
 };
 
 const DUPLICATE_HINTS = {
   evacuate: '保存先に同名ファイルがある場合、年月フォルダ内の 避難用_YYYYMMDD へ保存します（上書きしません）',
-  skip: '保存先に同名ファイルがある場合、そのPDFは移動しません',
+  skip: '保存先に同名ファイルがある場合、そのファイルは移動しません',
 };
 
 const MOVE_STRATEGY_HINTS = {
@@ -3321,6 +3489,7 @@ function bindSettingsDialog() {
     const key = input.dataset.setting;
     let value = state.settings[key];
     if (key === 'common_base' && value === '{BASE_FOLDER}') value = '';
+    if (Array.isArray(value)) value = value.join(', ');
     if (input.type === 'checkbox') input.checked = !!value;
     else input.value = value === undefined || value === null ? '' : value;
   });
@@ -3335,15 +3504,27 @@ function updateSettingHints() {
   const sample = joinPath(base || '{共通保存先}', firstRule ? firstRule.destination_subfolder : '{保存先サブフォルダ}',
     state.settings.use_month_folder ? '2026-08' : '');
 
+  const source = String(state.settings.source_folder || '').trim();
+  const sourceProblem = sourceError();
+  $('#hint-source-folder').textContent = sourceProblem
+    ? `${sourceProblem}（例: D:\\受信箱 のように絶対パスで指定します）`
+    : source
+      ? `ここから仕分けます: ${tailText(source, 48)}`
+      : `空欄なのでツールと同じフォルダから仕分けます: ${tailText(meta.script_folder || '', 40)}`;
+  $('#hint-source-folder').title = source || (meta.script_folder || '');
+  $('#hint-extensions').textContent = (state.settings.target_extensions || []).length
+    ? `対象: ${extensionsText()}（カンマ区切りで追加できます）`
+    : '空欄のためすべてのファイルが対象です（ツール自身のファイルは除きます）';
+
   $('#settings-lead').hidden = !problem;
   $('#hint-common-base').textContent = problem
     ? `${problem}（例: D:\\共有\\設備記録 のように絶対パスで指定します）`
     : commonBaseRequired()
       ? `保存先フォルダを指定していないルールが使います。保存先の例: ${tailText(sample, 48)}`
       : 'いまは使われていません（すべての有効なルールが専用の保存先フォルダを指定しています）';
-  const unknownPath = joinPath(meta.script_folder || '', state.settings.unknown_folder || '');
+  const unknownPath = joinPath(sourceFolderText(), state.settings.unknown_folder || '');
   const logFilePath = joinPath(meta.script_folder || '', state.settings.log_folder || '', 'move_log.csv');
-  $('#hint-unknown-folder').textContent = `ルールに一致しないPDFの退避先: ${tailText(unknownPath, 40)}`;
+  $('#hint-unknown-folder').textContent = `ルールに一致しないファイルの退避先: ${tailText(unknownPath, 40)}`;
   $('#hint-unknown-folder').title = unknownPath;
   $('#hint-log-folder').textContent = `移動結果CSVの保存先: ${tailText(logFilePath, 40)}`;
   $('#hint-log-folder').title = logFilePath;
@@ -3359,6 +3540,7 @@ function updateSettingHints() {
 
   const patterns = (meta.month_patterns || []).join(' / ');
   $('#fixed-settings').innerHTML = [
+    ['対象の範囲', `移動元フォルダ直下のみ（サブフォルダ内と一時ファイルは対象外）`],
     ['既存ファイルの上書き', '常に禁止（事故防止の必須要件のため変更できません）'],
     ['年月フォルダの形式', `${state.settings.month_folder_format}（初期仕様で固定）`],
     ['年月の取得元', 'ファイル名（初期仕様で固定）'],
@@ -3411,7 +3593,7 @@ function addRule() {
     enabled: true,
     priority: nextPriority(),
     name: '',
-    extension: '.pdf',
+    extension: '',
     contains_all_text: '',
     contains_any_text: '',
     not_contains_text: '',
@@ -3701,6 +3883,7 @@ function bindEvents() {
       const key = input.dataset.setting;
       if (input.type === 'checkbox') state.settings[key] = input.checked;
       else if (input.type === 'number') state.settings[key] = Number(input.value);
+      else if (key === 'target_extensions') state.settings[key] = splitExtensions(input.value);
       else state.settings[key] = input.value;
       markDirty();
       updateSettingHints();

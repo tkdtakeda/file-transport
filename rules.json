@@ -1,4 +1,8 @@
 {
+  "source_folder": "",
+  "target_extensions": [
+    ".pdf"
+  ],
   "common_base": "{BASE_FOLDER}",
   "unknown_folder": "_unknown",
   "log_folder": "_log",
