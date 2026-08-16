@@ -27,7 +27,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP_NAME = "PDF自動仕分け ルール管理"
+APP_NAME = "PDF自動仕分けツール"
 APP_VERSION = "1.0.0"
 
 HOST = "127.0.0.1"
@@ -1195,7 +1195,7 @@ def load_for_cli() -> tuple:
 # =========================================================================
 
 def cli_preview() -> int:
-    print_header(f"{APP_NAME} - 移動プレビュー")
+    print_header(f"{APP_NAME} - 移動プレビュー（画面を使わない実行）")
     settings, _ = load_for_cli()
     if settings is None:
         return 1
@@ -1220,7 +1220,7 @@ def cli_preview() -> int:
 
 
 def cli_sort() -> int:
-    print_header(f"{APP_NAME} - PDF移動")
+    print_header(f"{APP_NAME} - PDF移動（画面を使わない実行）")
     settings, _ = load_for_cli()
     if settings is None:
         return 1
@@ -1366,6 +1366,8 @@ class SorterHandler(BaseHTTPRequestHandler):
             self._handle_sort()
         elif path == "/api/undo":
             self._handle_undo()
+        elif path == "/api/shutdown":
+            self._handle_shutdown()
         else:
             self._send_json({"ok": False, "message": "見つかりません"}, 404)
 
@@ -1470,9 +1472,14 @@ class SorterHandler(BaseHTTPRequestHandler):
         result["_meta"] = build_meta(settings, errors)
         self._send_json(result)
 
+    def _handle_shutdown(self):
+        """画面からツールを終了する（コンソールを操作させないため）。"""
+        self._send_json({"ok": True, "message": "ツールを終了しました"})
+        threading.Thread(target=self.server.shutdown, daemon=True).start()
+
 
 def start_server() -> int:
-    print_header(f"{APP_NAME} - ルール編集画面")
+    print_header(APP_NAME)
     _, errors, fatal = load_settings()  # 起動時に rules.json を用意する
     if errors:
         print_settings_errors(errors)
@@ -1491,15 +1498,17 @@ def start_server() -> int:
             continue
     if httpd is None:
         echo(f"[ NG ] ポート {PORT}〜{PORT + PORT_RETRY - 1} がすべて使用中のため起動できません。")
-        echo("      起動済みのルール編集画面を閉じてから、もう一度実行してください。")
+        echo("      起動済みの操作画面を終了してから、もう一度実行してください。")
         return 1
 
     url = f"http://{HOST}:{httpd.server_address[1]}/"
     echo(f"対象フォルダ : {app_dir()}")
     echo(f"設定ファイル : {rules_path()}")
-    echo(f"画面URL      : {url}")
+    echo(f"操作画面     : {url}")
     echo()
-    echo("ブラウザを開きます。閉じるときはこのウィンドウで Ctrl + C を押してください。")
+    echo("ブラウザで操作画面を開きます。")
+    echo("ルールの設定、移動プレビュー、PDF移動は、すべて画面から行えます。")
+    echo("終了するときは、画面右上の「…」から「ツールを終了」を選んでください。")
     echo("（このサーバーは 127.0.0.1 のみで待ち受けます。外部へは公開されません）")
     echo()
 
@@ -1508,9 +1517,9 @@ def start_server() -> int:
         httpd.serve_forever()
     except KeyboardInterrupt:
         echo()
-        echo("ルール編集画面を終了しました。")
     finally:
         httpd.server_close()
+    echo("ツールを終了しました。このウィンドウは閉じて構いません。")
     return 0
 
 
@@ -1519,9 +1528,10 @@ def start_server() -> int:
 # =========================================================================
 
 USAGE = """使い方:
-  py pdf_sorter_app.py server    ルール編集画面を起動する（edit_rules.bat）
-  py pdf_sorter_app.py sort      rules.json に従いPDFを移動する（run_sort.bat）
-  py pdf_sorter_app.py preview   移動予定先をコンソールに表示する（移動しません）
+  py pdf_sorter_app.py           操作画面を開く（PDF仕分けツール.bat と同じ。通常はこちら）
+  py pdf_sorter_app.py server    操作画面を開く
+  py pdf_sorter_app.py sort      画面を使わずPDFを移動する（タスクスケジューラ等での自動実行用）
+  py pdf_sorter_app.py preview   画面を使わず移動予定先をコンソールに表示する（移動しません）
 """
 
 
@@ -1554,7 +1564,7 @@ UI_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PDF自動仕分け ルール管理</title>
+<title>PDF自動仕分けツール</title>
 <link rel="stylesheet" href="/app.css">
 </head>
 <body>
@@ -1564,7 +1574,7 @@ UI_HTML = r"""<!DOCTYPE html>
     <div class="topbar__identity">
       <span class="topbar__mark" aria-hidden="true">PDF</span>
       <div class="topbar__names">
-        <h1 class="topbar__title">PDF自動仕分け ルール管理</h1>
+        <h1 class="topbar__title">PDF自動仕分けツール</h1>
         <p class="topbar__sub" id="topbar-sub">読み込み中です</p>
       </div>
     </div>
@@ -1578,7 +1588,9 @@ UI_HTML = r"""<!DOCTYPE html>
           <button type="button" role="menuitem" data-menu="reload">rules.json を再読み込み</button>
           <button type="button" role="menuitem" data-menu="copy-log">ログのパスをコピー</button>
           <button type="button" role="menuitem" data-menu="copy-backup">バックアップ先のパスをコピー</button>
+          <hr class="menu__split">
           <button type="button" role="menuitem" data-menu="clear-rules" class="menu__danger">すべてのルールを削除</button>
+          <button type="button" role="menuitem" data-menu="quit">ツールを終了</button>
         </div>
       </div>
     </div>
@@ -1631,11 +1643,20 @@ UI_HTML = r"""<!DOCTYPE html>
 
 <div class="toasts" id="toasts" aria-live="polite"></div>
 
+<div class="farewell" id="farewell" hidden>
+  <div class="farewell__box">
+    <p class="farewell__title">ツールを終了しました</p>
+    <p class="farewell__text">この画面（ブラウザのタブ）は閉じて構いません。<br>
+      もう一度使うときは <b>PDF仕分けツール.bat</b> を実行してください。</p>
+  </div>
+</div>
+
 <dialog class="dialog" id="settings-dialog" aria-labelledby="settings-title">
   <form method="dialog" class="dialog__form">
     <header class="dialog__head">
       <h2 id="settings-title">共通設定</h2>
       <p>すべてのルールに共通する設定です。変更は画面上の内容として保持され、保存または実行のときに rules.json へ書き込まれます。</p>
+      <p class="dialog__lead" id="settings-lead" hidden>まず、仕分けしたPDFの保存先（共通保存先フォルダ）を指定してください。ここが決まると実行できるようになります。</p>
     </header>
 
     <div class="dialog__body scroll">
@@ -2053,6 +2074,29 @@ ul { list-style: none; }
 }
 .menu__list button:hover { background: var(--color-surface-3); }
 .menu__danger { color: var(--color-danger); }
+.menu__split { height: 0; margin: var(--space-1) 0; border: 0; border-top: var(--border-width) solid var(--color-line-quiet); }
+
+/* 終了後の画面 ------------------------------------------------------ */
+.farewell {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: var(--space-5);
+  background: var(--color-canvas);
+}
+.farewell__box {
+  max-width: 46ch;
+  padding: var(--space-5);
+  background: var(--color-surface);
+  border: var(--border-width) solid var(--color-line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-2);
+  text-align: center;
+}
+.farewell__title { font-size: var(--font-size-lg); font-weight: 600; color: var(--color-main); }
+.farewell__text { margin-top: var(--space-2); font-size: var(--font-size-sm); color: var(--color-text-muted); }
 
 /* 作業領域 ---------------------------------------------------------- */
 .workspace {
@@ -2449,6 +2493,15 @@ option { background: var(--color-field); color: var(--color-text); }
 .dialog__head { padding: var(--space-4); border-bottom: var(--border-width) solid var(--color-line-quiet); }
 .dialog__head h2 { font-size: var(--font-size-lg); font-weight: 600; color: var(--color-main); }
 .dialog__head p { margin-top: var(--space-1); font-size: var(--font-size-xs); color: var(--color-text-faint); }
+.dialog__lead {
+  margin-top: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: var(--border-width) solid var(--color-accent-edge);
+  border-radius: var(--radius-sm);
+  background: var(--color-accent-quiet);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+}
 .dialog__body {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2523,7 +2576,10 @@ const state = {
   view: { mode: 'idle', items: [], summary: null, at: '', filter: null },
   expanded: new Set(),
   nextId: 1,
+  closed: false,
 };
+
+let firstLoad = true;
 
 const RESULT_INFO = {
   MATCH: { label: '移動予定', icon: '→', tone: 'info' },
@@ -2640,6 +2696,7 @@ function formatBytes(size) {
    ===================================================================== */
 
 async function api(path, method, body) {
+  if (state.closed) return { ok: false, status: 0, data: { ok: false, message: 'ツールは終了しています' } };
   const options = { method: method || 'GET', headers: { 'Accept': 'application/json' } };
   if (body !== undefined && body !== null) {
     options.headers['Content-Type'] = 'application/json';
@@ -2715,6 +2772,15 @@ async function loadAll(quiet) {
     toast(`rules.json に ${data._errors.length} 件の問題があります。内容を確認してください。`);
   } else if (!quiet) {
     toast('rules.json を読み込みました');
+  }
+
+  if (firstLoad) {
+    firstLoad = false;
+    const base = String(state.settings.common_base || '').trim();
+    if (!base || base === '{BASE_FOLDER}') {
+      bindSettingsDialog();
+      $('#settings-dialog').showModal();
+    }
   }
 }
 
@@ -3162,7 +3228,8 @@ const MOVE_STRATEGY_HINTS = {
 function bindSettingsDialog() {
   document.querySelectorAll('[data-setting]').forEach((input) => {
     const key = input.dataset.setting;
-    const value = state.settings[key];
+    let value = state.settings[key];
+    if (key === 'common_base' && value === '{BASE_FOLDER}') value = '';
     if (input.type === 'checkbox') input.checked = !!value;
     else input.value = value === undefined || value === null ? '' : value;
   });
@@ -3177,6 +3244,7 @@ function updateSettingHints() {
   const sample = joinPath(base || '{共通保存先}', firstRule ? firstRule.destination_subfolder : '{保存先サブフォルダ}',
     state.settings.use_month_folder ? '2026-08' : '');
 
+  $('#settings-lead').hidden = !problem;
   $('#hint-common-base').textContent = problem
     ? `${problem}（例: D:\\共有\\設備記録 のように絶対パスで指定します）`
     : `保存先の例: ${tailText(sample, 56)}`;
@@ -3219,24 +3287,25 @@ function markDirty() {
   renderActionBar();
 }
 
-function toast(message, action) {
+function toast(message, actions) {
+  const list = actions ? (Array.isArray(actions) ? actions : [actions]) : [];
   const box = $('#toasts');
   const element = document.createElement('div');
   element.className = 'toast';
   element.innerHTML = `<span>${esc(message)}</span>`;
-  if (action) {
+  list.forEach((action) => {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'btn btn--quiet';
     button.textContent = action.label;
     button.addEventListener('click', () => {
-      action.run();
       element.remove();
+      action.run();
     });
     element.appendChild(button);
-  }
+  });
   box.appendChild(element);
-  setTimeout(() => element.remove(), action ? 12000 : 5000);
+  setTimeout(() => element.remove(), list.length ? 12000 : 5000);
 }
 
 function nextPriority() {
@@ -3407,6 +3476,25 @@ function summarizeItems(items) {
   return summary;
 }
 
+/* ツールの終了（コンソールを触らずに済ませる） */
+function quitTool() {
+  if (state.dirty) {
+    toast('未保存の変更があります。どうしますか？', [
+      { label: '保存して終了', run: async () => { if (await doSave(true)) shutdown(); } },
+      { label: '保存せず終了', run: shutdown },
+    ]);
+    return;
+  }
+  shutdown();
+}
+
+async function shutdown() {
+  state.dirty = false;
+  await api('/api/shutdown', 'POST', {});
+  state.closed = true;
+  $('#farewell').hidden = false;
+}
+
 async function copyText(text, label) {
   try {
     await navigator.clipboard.writeText(text);
@@ -3553,6 +3641,7 @@ function bindEvents() {
     else if (action === 'clear-rules') clearRules();
     else if (action === 'copy-log') copyText(state.meta ? state.meta.log_path : '', 'ログのパス');
     else if (action === 'copy-backup') copyText(state.meta ? state.meta.backup_folder : '', 'バックアップ先のパス');
+    else if (action === 'quit') quitTool();
   });
 
   // キーボード
