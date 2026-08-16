@@ -1743,37 +1743,45 @@ UI_HTML = r"""<!DOCTYPE html>
 
 
 UI_CSS = r""":root {
-  /* 色 ------------------------------------------------------------- */
-  --color-canvas: #061527;
-  --color-surface: #0c2340;
-  --color-surface-2: #113054;
-  --color-surface-3: #17395f;
-  --color-line: #1e4472;
-  --color-line-quiet: #16355a;
-  --color-text: #e9f1fb;
-  --color-text-muted: #a3b9d6;
-  --color-text-faint: #8098b8;
-  --color-accent: #5b9df5;
-  --color-accent-hover: #79b0f8;
-  --color-accent-ink: #04162b;
-  --color-accent-quiet: rgba(91, 157, 245, 0.14);
-  --color-focus: #8ec1ff;
-  --color-success: #6fe0ad;
-  --color-success-quiet: rgba(111, 224, 173, 0.13);
-  --color-warn: #ffcf70;
-  --color-warn-quiet: rgba(255, 207, 112, 0.13);
-  --color-danger: #ff9d9d;
-  --color-danger-quiet: rgba(255, 157, 157, 0.13);
-  --color-info: #8ec1ff;
-  --color-info-quiet: rgba(142, 193, 255, 0.13);
-  --color-neutral: #a9bdd8;
-  --color-neutral-quiet: rgba(169, 189, 216, 0.12);
-  --color-bar-shade: #0a1e38;
-  --color-well: rgba(6, 21, 39, 0.32);
-  --color-well-strong: rgba(6, 21, 39, 0.48);
-  --color-row-hover: rgba(23, 57, 95, 0.35);
-  --color-backdrop: rgba(3, 11, 22, 0.72);
-  --color-placeholder: #5f779a;
+  /* 色 --------------------------------------------------------------
+     ベースは淡い青、アクセントは深い青。
+     文字色・状態色はいずれも背景に対して 4.5:1 以上を確保している。 */
+  --color-canvas: #dbe6f5;
+  --color-surface: #f6f9fe;
+  --color-surface-2: #eaf1fb;
+  --color-surface-3: #dce8f7;
+  --color-field: #ffffff;
+  --color-line: #bed2ea;
+  --color-line-quiet: #d5e2f2;
+  --color-text: #0f2947;
+  --color-text-muted: #33496a;
+  --color-text-faint: #4b6280;
+  --color-accent: #12457f;
+  --color-accent-hover: #0d3767;
+  --color-accent-ink: #ffffff;
+  --color-accent-quiet: rgba(18, 69, 127, 0.10);
+  --color-focus: #12457f;
+  --color-success: #0f6a4a;
+  --color-success-quiet: rgba(15, 106, 74, 0.10);
+  --color-success-edge: rgba(15, 106, 74, 0.28);
+  --color-warn: #8a5300;
+  --color-warn-quiet: rgba(138, 83, 0, 0.10);
+  --color-warn-edge: rgba(138, 83, 0, 0.28);
+  --color-danger: #b02318;
+  --color-danger-quiet: rgba(176, 35, 24, 0.09);
+  --color-danger-edge: rgba(176, 35, 24, 0.28);
+  --color-info: #12457f;
+  --color-info-quiet: rgba(18, 69, 127, 0.10);
+  --color-info-edge: rgba(18, 69, 127, 0.28);
+  --color-neutral: #4a6183;
+  --color-neutral-quiet: rgba(74, 97, 131, 0.09);
+  --color-neutral-edge: rgba(74, 97, 131, 0.26);
+  --color-bar-shade: #d9e5f5;
+  --color-well: rgba(18, 69, 127, 0.045);
+  --color-well-strong: rgba(18, 69, 127, 0.075);
+  --color-row-hover: rgba(18, 69, 127, 0.06);
+  --color-backdrop: rgba(15, 41, 71, 0.42);
+  --color-placeholder: #5f7797;
 
   /* 余白 ----------------------------------------------------------- */
   --space-hair: 1px;
@@ -1835,7 +1843,7 @@ UI_CSS = r""":root {
   --easing: cubic-bezier(0.2, 0.7, 0.3, 1);
 
   /* 影 ------------------------------------------------------------- */
-  --shadow-2: 0 14px 38px rgba(2, 10, 20, 0.55);
+  --shadow-2: 0 12px 30px rgba(15, 41, 71, 0.18);
 }
 
 * { box-sizing: border-box; }
@@ -1930,7 +1938,7 @@ ul { list-style: none; }
   padding: var(--space-1) var(--space-3);
   border: var(--border-width) solid var(--color-line-quiet);
   border-radius: var(--radius-pill);
-  background: var(--color-well-strong);
+  background: var(--color-surface);
 }
 
 .fact dt { flex: 0 0 auto; font-size: var(--font-size-xs); color: var(--color-text-faint); }
@@ -1990,7 +1998,7 @@ ul { list-style: none; }
 .btn--primary:hover:not(:disabled) { background: var(--color-accent-hover); border-color: var(--color-accent-hover); }
 .btn--primary:disabled { background: var(--color-surface-2); border-color: var(--color-line); color: var(--color-text-faint); }
 
-.btn--danger { color: var(--color-danger); border-color: var(--color-danger-quiet); }
+.btn--danger { color: var(--color-danger); }
 .btn--danger:hover:not(:disabled) { background: var(--color-danger-quiet); }
 
 /* メニュー ---------------------------------------------------------- */
@@ -2002,7 +2010,7 @@ ul { list-style: none; }
   z-index: 30;
   min-width: var(--menu-min-width);
   padding: var(--space-1);
-  background: var(--color-surface-2);
+  background: var(--color-surface);
   border: var(--border-width) solid var(--color-line);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-2);
@@ -2161,7 +2169,7 @@ input[type="text"], input[type="number"], select {
   padding: 0 var(--space-2);
   border: var(--border-width) solid var(--color-line);
   border-radius: var(--radius-sm);
-  background: var(--color-canvas);
+  background: var(--color-field);
   color: var(--color-text);
   font-family: inherit;
   font-size: var(--font-size-sm);
@@ -2171,7 +2179,7 @@ input:hover, select:hover { border-color: var(--color-line); }
 input:focus, select:focus { border-color: var(--color-accent); }
 input[aria-invalid="true"] { border-color: var(--color-danger); }
 select { cursor: pointer; }
-option { background: var(--color-surface-2); color: var(--color-text); }
+option { background: var(--color-field); color: var(--color-text); }
 
 .check { display: inline-flex; align-items: center; gap: var(--space-2); flex: 0 0 auto; cursor: pointer; }
 .check input { position: absolute; opacity: 0; width: 0; height: 0; }
@@ -2213,11 +2221,11 @@ option { background: var(--color-surface-2); color: var(--color-text); }
   white-space: nowrap;
 }
 .chip__icon { font-size: var(--font-size-icon); }
-.chip--success { color: var(--color-success); background: var(--color-success-quiet); border-color: var(--color-success-quiet); }
-.chip--warn { color: var(--color-warn); background: var(--color-warn-quiet); border-color: var(--color-warn-quiet); }
-.chip--danger { color: var(--color-danger); background: var(--color-danger-quiet); border-color: var(--color-danger-quiet); }
-.chip--info { color: var(--color-info); background: var(--color-info-quiet); border-color: var(--color-info-quiet); }
-.chip--neutral { color: var(--color-neutral); background: var(--color-neutral-quiet); border-color: var(--color-neutral-quiet); }
+.chip--success { color: var(--color-success); background: var(--color-success-quiet); border-color: var(--color-success-edge); }
+.chip--warn { color: var(--color-warn); background: var(--color-warn-quiet); border-color: var(--color-warn-edge); }
+.chip--danger { color: var(--color-danger); background: var(--color-danger-quiet); border-color: var(--color-danger-edge); }
+.chip--info { color: var(--color-info); background: var(--color-info-quiet); border-color: var(--color-info-edge); }
+.chip--neutral { color: var(--color-neutral); background: var(--color-neutral-quiet); border-color: var(--color-neutral-edge); }
 
 /* 集計と絞り込み ---------------------------------------------------- */
 .summary {
@@ -2393,7 +2401,7 @@ option { background: var(--color-surface-2); color: var(--color-text); }
   align-items: center;
   gap: var(--space-3);
   padding: var(--space-2) var(--space-3);
-  background: var(--color-surface-3);
+  background: var(--color-surface);
   border: var(--border-width) solid var(--color-line);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-2);
