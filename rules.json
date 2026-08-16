@@ -27,6 +27,7 @@
       ],
       "contains_any": [],
       "not_contains": [],
+      "destination_base": "",
       "destination_subfolder": "EquipmentA"
     }
   ]

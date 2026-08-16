@@ -113,6 +113,7 @@ DEFAULT_RULE = {
     "contains_all": [],
     "contains_any": [],
     "not_contains": [],
+    "destination_base": "",
     "destination_subfolder": "",
 }
 
@@ -290,6 +291,12 @@ def normalize_rule(raw, index: int, errors: list) -> dict:
     if not (rule["contains_all"] or rule["contains_any"]):
         errors.append(f"{label}: すべて含む／いずれか含む のどちらかにキーワードが必要です（全ファイルに一致してしまうため）")
 
+    base = _as_str(raw.get("destination_base", ""), f"{label} の 保存先フォルダ", errors)
+    error = base_format_error(base, f"{label} の 保存先フォルダ")
+    if error:
+        errors.append(error)
+    rule["destination_base"] = base
+
     subfolder = _as_str(raw.get("destination_subfolder", ""), f"{label} の 保存先サブフォルダ", errors)
     error = subfolder_error(subfolder, f"{label} の 保存先サブフォルダ")
     if error:
@@ -346,22 +353,52 @@ def normalize_settings(raw) -> tuple:
     return settings, errors
 
 
-def base_folder_error(settings: dict) -> str:
-    """共通保存先フォルダが実際に使えるかを判定する。使えない理由を返す。"""
-    base = settings.get("common_base", "")
-    if not base or base == UNSET_BASE_PLACEHOLDER:
-        return "共通保存先フォルダが未設定です"
+def base_format_error(text: str, label: str) -> str:
+    """保存先の基準フォルダとして書式が正しいかを判定する（存在確認はしない）。"""
+    if not text:
+        return ""
     for char in WINDOWS_FORBIDDEN_CHARS.replace(":", ""):
-        if char in base:
-            return f"共通保存先フォルダに使用できない文字 {char} が含まれています"
-    path = Path(base)
-    if not path.is_absolute():
-        return "共通保存先フォルダは絶対パスで指定してください"
-    if not path.exists():
-        return f"共通保存先フォルダが見つかりません（{base}）"
-    if not path.is_dir():
-        return f"共通保存先フォルダがフォルダではありません（{base}）"
+        if char in text:
+            return f"{label}に使用できない文字 {char} が含まれています"
+    if ".." in re.split(r"[\\/]", text):
+        return f"{label}に .. は使用できません"
+    if not (re.match(r"^[A-Za-z]:[\\/]", text) or text.startswith(("\\\\", "/"))):
+        return f"{label}は絶対パスで指定してください（例: D:\\共有\\設備記録）"
     return ""
+
+
+def folder_path_error(text: str, label: str) -> str:
+    """保存先の基準フォルダが実際に使えるかを判定する。使えない理由を返す。"""
+    text = (text or "").strip()
+    if not text or text == UNSET_BASE_PLACEHOLDER:
+        return f"{label}が未設定です"
+    error = base_format_error(text, label)
+    if error:
+        return error
+    path = Path(text)
+    if not path.exists():
+        return f"{label}が見つかりません（{text}）"
+    if not path.is_dir():
+        return f"{label}がフォルダではありません（{text}）"
+    return ""
+
+
+def base_folder_error(settings: dict) -> str:
+    """共通保存先フォルダが実際に使えるかを判定する。"""
+    return folder_path_error(settings.get("common_base", ""), "共通保存先フォルダ")
+
+
+def resolve_rule_base(rule: dict, settings: dict) -> tuple:
+    """ルールが使う保存先フォルダと、それがルール専用かどうかを返す。"""
+    own = (rule.get("destination_base") or "").strip()
+    if own:
+        return own, True
+    return (settings.get("common_base", "") or "").strip(), False
+
+
+def common_base_required(settings: dict) -> bool:
+    """共通保存先フォルダを使う有効なルールがあるか（無ければ未設定でも実行できる）。"""
+    return any(not (rule.get("destination_base") or "").strip() for rule in sorted_rules(settings))
 
 
 # =========================================================================
@@ -623,13 +660,19 @@ def build_plan(path: Path, settings: dict, rules: list, today: datetime) -> dict
         return plan
 
     plan["rule_name"] = rule.get("name", "")
-    base_error = base_folder_error(settings)
+
+    # 保存先の基準フォルダはルールごとに指定できる（未指定なら共通保存先）
+    base_text, own_base = resolve_rule_base(rule, settings)
+    label = f"ルール「{rule.get('name')}」の保存先フォルダ" if own_base else "共通保存先フォルダ"
+    base_error = folder_path_error(base_text, label)
     if base_error:
         plan.update(result=E_FORBIDDEN_PATH, message=base_error,
-                    reason=plan["reason"] + ["共通保存先を確定できないため移動先を計算できません"])
+                    reason=plan["reason"] + ["保存先を確定できないため移動先を計算できません"])
         return plan
 
-    rule_base = Path(settings["common_base"]) / rule.get("destination_subfolder", "")
+    plan["reason"].append(
+        f"保存先: {'このルール専用のフォルダ' if own_base else '共通保存先'} {base_text}")
+    rule_base = Path(base_text) / rule.get("destination_subfolder", "")
     month_folder = ""
 
     if settings.get("use_month_folder"):
@@ -1104,6 +1147,7 @@ def build_meta(settings: dict, errors: list) -> dict:
         "files": files,
         "file_count": len(files),
         "base_folder_error": base_folder_error(settings),
+        "common_base_required": common_base_required(settings),
         "errors": errors,
         "lock": {"locked": lock.exists(), "holder": holder, "path": str(lock)},
         "undo": {
@@ -1200,12 +1244,14 @@ def cli_preview() -> int:
     if settings is None:
         return 1
 
-    base_error = base_folder_error(settings)
-    if base_error:
-        echo(f"[ NG ] {base_error}")
-        echo(f"      共通保存先フォルダ: {settings.get('common_base')}")
-        echo("      edit_rules.bat を実行して共通設定を修正してください。")
-        return 1
+    if common_base_required(settings):
+        base_error = base_folder_error(settings)
+        if base_error:
+            echo(f"[ NG ] {base_error}")
+            echo(f"      共通保存先フォルダ: {settings.get('common_base')}")
+            echo("      PDF仕分けツール.bat を実行して共通設定を修正してください。")
+            echo("      （ルールごとに保存先フォルダを指定している場合、共通保存先は使われません）")
+            return 1
 
     files = collect_target_files()
     echo(f"対象フォルダ : {app_dir()}")
@@ -1225,12 +1271,14 @@ def cli_sort() -> int:
     if settings is None:
         return 1
 
-    base_error = base_folder_error(settings)
-    if base_error:
-        echo(f"[ NG ] {base_error}")
-        echo(f"      共通保存先フォルダ: {settings.get('common_base')}")
-        echo("      edit_rules.bat を実行して共通設定を修正してください。")
-        return 1
+    if common_base_required(settings):
+        base_error = base_folder_error(settings)
+        if base_error:
+            echo(f"[ NG ] {base_error}")
+            echo(f"      共通保存先フォルダ: {settings.get('common_base')}")
+            echo("      PDF仕分けツール.bat を実行して共通設定を修正してください。")
+            echo("      （ルールごとに保存先フォルダを指定している場合、共通保存先は使われません）")
+            return 1
 
     with SortLock() as lock:
         if not lock.acquire():
@@ -1410,7 +1458,7 @@ class SorterHandler(BaseHTTPRequestHandler):
         if error:
             self._send_json(error, 400)
             return
-        base_error = base_folder_error(settings)
+        base_error = base_folder_error(settings) if common_base_required(settings) else ""
         files = collect_target_files()
         items = build_plans(settings, files)
         self._send_json({
@@ -1427,11 +1475,12 @@ class SorterHandler(BaseHTTPRequestHandler):
         if error:
             self._send_json(error, 400)
             return
-        base_error = base_folder_error(settings)
-        if base_error:
-            self._send_json({"ok": False, "result": E_FORBIDDEN_PATH, "message": base_error,
-                             "errors": [base_error]}, 400)
-            return
+        if common_base_required(settings):
+            base_error = base_folder_error(settings)
+            if base_error:
+                self._send_json({"ok": False, "result": E_FORBIDDEN_PATH, "message": base_error,
+                                 "errors": [base_error]}, 400)
+                return
         try:
             write_settings_atomically(settings, backup=settings.get("backup_rules_on_save", True))
         except OSError as exc:
@@ -2675,14 +2724,25 @@ function tailText(text, limit) {
   return value.length > limit ? '…' + value.slice(value.length - limit) : value;
 }
 
-function pathSeparator() {
-  const base = String(state.settings.common_base || '');
-  return base.includes('\\') || /^[A-Za-z]:/.test(base) ? '\\' : '/';
+function pathSeparator(sample) {
+  const text = String(sample || state.settings.common_base || '');
+  return text.includes('\\') || /^[A-Za-z]:/.test(text) ? '\\' : '/';
 }
 
 function joinPath(...parts) {
-  const sep = pathSeparator();
+  const sep = pathSeparator(parts[0]);
   return parts.filter(Boolean).join(sep).replace(/[\\/]+$/, '');
+}
+
+/* ルールが使う保存先フォルダ（未指定なら共通保存先） */
+function ruleBase(rule) {
+  const own = String(rule.destination_base || '').trim();
+  return { path: own || String(state.settings.common_base || '').trim(), own: !!own };
+}
+
+/* 共通保存先を使う有効なルールがあるか */
+function commonBaseRequired() {
+  return state.rules.some((rule) => rule.enabled && !String(rule.destination_base || '').trim());
 }
 
 function formatBytes(size) {
@@ -2728,6 +2788,7 @@ function currentPayload() {
     contains_all: splitKeywords(rule.contains_all_text),
     contains_any: splitKeywords(rule.contains_any_text),
     not_contains: splitKeywords(rule.not_contains_text),
+    destination_base: (rule.destination_base || '').trim(),
     destination_subfolder: rule.destination_subfolder || '',
   }));
   return payload;
@@ -2745,6 +2806,7 @@ function adoptSettings(payload) {
     contains_all_text: joinKeywords(rule.contains_all),
     contains_any_text: joinKeywords(rule.contains_any),
     not_contains_text: joinKeywords(rule.not_contains),
+    destination_base: rule.destination_base || '',
     destination_subfolder: rule.destination_subfolder || '',
   }));
   sortRules();
@@ -2777,7 +2839,7 @@ async function loadAll(quiet) {
   if (firstLoad) {
     firstLoad = false;
     const base = String(state.settings.common_base || '').trim();
-    if (!base || base === '{BASE_FOLDER}') {
+    if ((!base || base === '{BASE_FOLDER}') && !state.rules.length) {
       bindSettingsDialog();
       $('#settings-dialog').showModal();
     }
@@ -2816,6 +2878,18 @@ function folderNameError(name, label) {
   return segmentError(name, label);
 }
 
+function baseFormatError(value, label) {
+  if (!value) return '';
+  for (const char of FORBIDDEN_CHARS) {
+    if (char !== ':' && value.includes(char)) return `${label}に使用できない文字 ${char} が含まれています`;
+  }
+  if (value.split(/[\\/]/).includes('..')) return `${label}に .. は使用できません`;
+  if (!/^([A-Za-z]:[\\/]|\\\\|\/)/.test(value)) {
+    return `${label}は絶対パスで指定してください（例: D:\\共有\\設備記録）`;
+  }
+  return '';
+}
+
 function subfolderError(value, label) {
   if (!value) return `${label}を入力してください`;
   if (/^[A-Za-z]:/.test(value) || value.startsWith('/') || value.startsWith('\\')) {
@@ -2846,6 +2920,8 @@ function validate() {
     if (!splitKeywords(rule.contains_all_text).length && !splitKeywords(rule.contains_any_text).length) {
       errors.contains_all_text = 'すべて含む／いずれか含む のどちらかにキーワードが必要です';
     }
+    const ownBaseError = baseFormatError(String(rule.destination_base || '').trim(), '保存先フォルダ');
+    if (ownBaseError) errors.destination_base = ownBaseError;
     const subError = subfolderError(String(rule.destination_subfolder || '').trim(), '保存先サブフォルダ');
     if (subError) errors.destination_subfolder = subError;
 
@@ -2869,6 +2945,7 @@ function validate() {
 }
 
 function baseError() {
+  if (!commonBaseRequired()) return '';
   const base = String(state.settings.common_base || '').trim();
   if (!base || base === '{BASE_FOLDER}') return '共通保存先フォルダが未設定です';
   for (const char of ['<', '>', '"', '|', '?', '*']) {
@@ -2900,11 +2977,13 @@ function renderFacts() {
   const facts = $('#facts');
   if (!meta) { facts.innerHTML = ''; return; }
 
-  const base = String(state.settings.common_base || '');
+  const base = String(state.settings.common_base || '').trim();
   const baseProblem = baseError();
+  const hasBase = base && base !== '{BASE_FOLDER}';
   const parts = [];
   parts.push(fact('作業フォルダ', meta.script_folder, false));
-  parts.push(fact('共通保存先', baseProblem ? baseProblem : base, !!baseProblem));
+  parts.push(fact('共通保存先',
+    baseProblem ? baseProblem : (hasBase ? base : 'ルールごとに指定'), !!baseProblem));
   parts.push(fact('ログ', meta.log_path, false));
   facts.innerHTML = parts.join('');
 
@@ -2979,14 +3058,19 @@ function ruleCard(rule, index, errors) {
     '任意。1つでも含めば条件を満たします', false)}
       ${field('含んではいけないキーワード', 'not_contains_text', rule.not_contains_text, null,
     '任意。1つでも含む場合は一致しません', false)}
+      ${field('このルール専用の保存先フォルダ', 'destination_base', rule.destination_base, errors.destination_base,
+    '空欄なら共通保存先を使います（例: D:\\共有\\設備A）', true)}
       ${field('保存先サブフォルダ', 'destination_subfolder', rule.destination_subfolder, errors.destination_subfolder,
-    '共通保存先の下に作るフォルダ名', false)}
+    '保存先フォルダの下に作るフォルダ名', false)}
       ${field('拡張子', 'extension', rule.extension, errors.extension, '初期仕様では .pdf のみ', false)}
     </div>
 
     <footer class="rule__foot">
       <span>保存先</span>
       <code title="${esc(destinationExample(rule, true))}">${esc(destinationExample(rule, false))}</code>
+      ${String(rule.destination_base || '').trim()
+    ? '<span class="chip chip--info"><span class="chip__icon" aria-hidden="true">→</span>このルール専用</span>'
+    : ''}
     </footer>
   </article>`;
 }
@@ -3004,13 +3088,16 @@ function field(label, name, value, error, hint, wide) {
 }
 
 function destinationExample(rule, full) {
-  const base = String(state.settings.common_base || '').trim();
-  if (!base || base === '{BASE_FOLDER}') return '共通保存先フォルダが未設定です';
+  const { path: base, own } = ruleBase(rule);
+  if (!base || base === '{BASE_FOLDER}') {
+    return own ? '保存先フォルダが未入力です' : '共通保存先フォルダが未設定です（このルール専用の保存先でも指定できます）';
+  }
   const sub = String(rule.destination_subfolder || '').trim();
   if (!sub) return '保存先サブフォルダが未入力です';
   const month = state.settings.use_month_folder ? 'YYYY-MM' : '';
   const path = joinPath(base, sub, month);
-  return full ? path : shortenPath(path);
+  if (full) return path;
+  return own ? tailText(path, 44) : shortenPath(path);
 }
 
 function renderSummary() {
@@ -3188,8 +3275,12 @@ function renderActionBar() {
     hintText = meta ? `${meta.script_folder} にPDFを置いてから「再読み込み」を押してください` : '';
   } else {
     const enabledRules = state.rules.filter((rule) => rule.enabled).length;
+    const bases = new Set(state.rules.filter((rule) => rule.enabled).map((rule) => ruleBase(rule).path));
+    const target = bases.size === 1
+      ? `${esc(tailText([...bases][0], 40))} 配下へ移動します`
+      : `${bases.size} か所の保存先へ振り分けます`;
     reasonHtml = enabledRules
-      ? `<span class="chip chip--info"><span class="chip__icon" aria-hidden="true">→</span>実行できます</span>${count} 件を判定して ${esc(tailText(state.settings.common_base, 40))} 配下へ移動します`
+      ? `<span class="chip chip--info"><span class="chip__icon" aria-hidden="true">→</span>実行できます</span>${count} 件を判定して ${target}`
       : `<span class="chip chip--warn"><span class="chip__icon" aria-hidden="true">▲</span>ルールなし</span>有効なルールが 0 件です。すべて判定不能フォルダへ移動します`;
     hintText = state.dirty
       ? '未保存の変更があります（実行すると rules.json も保存されます）'
@@ -3247,7 +3338,9 @@ function updateSettingHints() {
   $('#settings-lead').hidden = !problem;
   $('#hint-common-base').textContent = problem
     ? `${problem}（例: D:\\共有\\設備記録 のように絶対パスで指定します）`
-    : `保存先の例: ${tailText(sample, 56)}`;
+    : commonBaseRequired()
+      ? `保存先フォルダを指定していないルールが使います。保存先の例: ${tailText(sample, 48)}`
+      : 'いまは使われていません（すべての有効なルールが専用の保存先フォルダを指定しています）';
   const unknownPath = joinPath(meta.script_folder || '', state.settings.unknown_folder || '');
   const logFilePath = joinPath(meta.script_folder || '', state.settings.log_folder || '', 'move_log.csv');
   $('#hint-unknown-folder').textContent = `ルールに一致しないPDFの退避先: ${tailText(unknownPath, 40)}`;
@@ -3322,6 +3415,7 @@ function addRule() {
     contains_all_text: '',
     contains_any_text: '',
     not_contains_text: '',
+    destination_base: '',
     destination_subfolder: '',
   });
   markDirty();
